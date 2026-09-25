@@ -126,6 +126,7 @@ bwrap = executable(
     'bubblewrap.c',
     'bind-mount.c',
     'network.c',
+    'http-proxy.c',
     'utils.c',
     'chroot_realpath.c',
     'safe_openat.c',

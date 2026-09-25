@@ -39,6 +39,7 @@
 
 #include "utils.h"
 #include "network.h"
+#include "http-proxy.h"
 #include "bind-mount.h"
 
 #ifndef CLONE_NEWCGROUP
@@ -71,6 +72,7 @@ static bool opt_unshare_user_try = false;
 static bool opt_unshare_pid = false;
 static bool opt_unshare_ipc = false;
 static bool opt_unshare_net = false;
+static bool opt_share_net = false;
 static bool opt_unshare_uts = false;
 static bool opt_unshare_cgroup = false;
 static bool opt_unshare_cgroup_try = false;
@@ -95,6 +97,7 @@ static int next_perms = -1;
 static size_t next_size_arg = 0;
 static int next_overlay_src_count = 0;
 static bool opt_not_a_security_boundary = false;
+static HttpAllowList *opt_http_allow = NULL;
 
 #define CAP_TO_MASK_0(x) (1L << ((x) & 31))
 #define CAP_TO_MASK_1(x) CAP_TO_MASK_0(x - 32)
@@ -297,6 +300,7 @@ usage (int ecode, FILE *out)
            "    --level-prefix               Prepend e.g. <3> to diagnostic messages\n"
            "    --unshare-all                Unshare every namespace we support by default\n"
            "    --share-net                  Retain the network namespace (can only combine with --unshare-all)\n"
+           "    --http-allow HOST            Allow HTTPS to HOST via loopback proxy (repeatable; implies --unshare-net)\n"
            "    --unshare-user               Create new user namespace (may be automatically implied if not root)\n"
            "    --unshare-user-try           Create new user namespace if possible else continue by skipping it\n"
            "    --unshare-ipc                Create new ipc namespace\n"
@@ -1873,6 +1877,7 @@ parse_args_recurse (int          *argcp,
           opt_unshare_user_try = opt_unshare_ipc = opt_unshare_pid =
             opt_unshare_uts = opt_unshare_cgroup_try =
             opt_unshare_net = true;
+          opt_share_net = false;
         }
       /* Begin here the older individual --unshare variants */
       else if (strcmp (arg, "--unshare-user") == 0)
@@ -1894,6 +1899,7 @@ parse_args_recurse (int          *argcp,
       else if (strcmp (arg, "--unshare-net") == 0)
         {
           opt_unshare_net = true;
+          opt_share_net = false;
         }
       else if (strcmp (arg, "--unshare-uts") == 0)
         {
@@ -1911,8 +1917,23 @@ parse_args_recurse (int          *argcp,
       else if (strcmp (arg, "--share-net") == 0)
         {
           opt_unshare_net = false;
+          opt_share_net = true;
         }
       /* End --share variants, other arguments begin */
+      else if (strcmp (arg, "--http-allow") == 0)
+        {
+          if (argc < 2)
+            die ("--http-allow takes an argument");
+
+          if (opt_http_allow == NULL)
+            opt_http_allow = http_allow_list_new ();
+
+          if (http_allow_list_add (opt_http_allow, argv[1]) != 0)
+            die ("--http-allow: invalid host name: %s", argv[1]);
+
+          argv += 1;
+          argc -= 1;
+        }
       else if (strcmp (arg, "--chdir") == 0)
         {
           if (argc < 2)
@@ -2792,6 +2813,13 @@ parse_args (int          *argcp,
 
   if (next_overlay_src_count > 0)
     die ("--overlay-src must be followed by another --overlay-src or one of --overlay, --tmp-overlay, or --ro-overlay");
+
+  if (!http_allow_list_empty (opt_http_allow))
+    {
+      if (opt_share_net)
+        die ("--http-allow cannot be combined with --share-net");
+      opt_unshare_net = true;
+    }
 }
 
 static void
@@ -2898,6 +2926,9 @@ main (int    argc,
   int intermediate_pids_sockets[2] = {-1, -1};
   const char *exec_path = NULL;
   int i;
+  char *http_proxy_dir = NULL;
+  char *http_proxy_host_path = NULL;
+  int http_proxy_listen_fd = -1;
   struct sigaction sa = {};
 
   /* Handle --version early on before we try to acquire/drop
@@ -3043,6 +3074,23 @@ main (int    argc,
    * access ourselves. */
   base_path = "/tmp";
 
+  if (!http_allow_list_empty (opt_http_allow))
+    {
+      SetupOp *http_op;
+
+      http_proxy_dir = xstrdup ("/tmp/bwrap-http-XXXXXX");
+      if (mkdtemp (http_proxy_dir) == NULL)
+        die_with_error ("Can't create http proxy directory");
+      http_proxy_host_path = xasprintf ("%s/proxy.sock", http_proxy_dir);
+      http_proxy_listen_fd = http_proxy_listen_unix (http_proxy_host_path);
+      if (http_proxy_listen_fd < 0)
+        die_with_error ("Can't listen on http proxy socket");
+
+      http_op = setup_op_new (SETUP_RO_BIND_MOUNT);
+      http_op->source = http_proxy_host_path;
+      http_op->dest = HTTP_PROXY_SANDBOX_PATH;
+    }
+
   debug ("creating new namespace");
 
   if (opt_unshare_pid && !opt_as_pid_1)
@@ -3155,6 +3203,32 @@ main (int    argc,
       /* We don't need any privileges in the launcher, drop them immediately. */
       drop_privs (false);
 
+      if (http_proxy_listen_fd >= 0)
+        {
+          pid_t helper;
+          int keep[2];
+
+          helper = fork ();
+          if (helper == -1)
+            die_with_error ("Can't fork http proxy");
+          if (helper == 0)
+            {
+              if (prctl (PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0)
+                die_with_error ("prctl");
+              if (getppid () == 1)
+                _exit (1);
+              keep[0] = http_proxy_listen_fd;
+              keep[1] = -1;
+              fdwalk (close_extra_fds, keep);
+              http_proxy_run_server (http_proxy_listen_fd,
+                                     http_allow_list_hosts (opt_http_allow),
+                                     http_allow_list_len (opt_http_allow));
+              _exit (1);
+            }
+          close (http_proxy_listen_fd);
+          http_proxy_listen_fd = -1;
+        }
+
       /* Optionally bind our lifecycle to that of the parent */
       handle_die_with_parent ();
 
@@ -3187,7 +3261,16 @@ main (int    argc,
       /* Ignore res, if e.g. the child died and closed child_wait_fd we don't want to error out here */
       close (child_wait_fd);
 
-      return monitor_child (event_fd, pid, setup_finished_pipe[0]);
+      {
+        int exitc;
+
+        exitc = monitor_child (event_fd, pid, setup_finished_pipe[0]);
+        if (http_proxy_host_path != NULL)
+          unlink (http_proxy_host_path);
+        if (http_proxy_dir != NULL)
+          rmdir (http_proxy_dir);
+        return exitc;
+      }
     }
 
   if (opt_pidns_fd != -1)
@@ -3234,6 +3317,9 @@ main (int    argc,
 
   if (opt_json_status_fd != -1)
     close (opt_json_status_fd);
+
+  if (http_proxy_listen_fd >= 0)
+    close (http_proxy_listen_fd);
 
   /* Wait for the parent to init uid/gid maps and drop caps */
   res = read (child_wait_fd, &val, 8);
@@ -3511,6 +3597,34 @@ main (int    argc,
 
           return do_init (event_fd, pid);
         }
+    }
+
+  if (!http_allow_list_empty (opt_http_allow))
+    {
+      int lfd;
+      pid_t shim;
+      int keep[2];
+
+      http_proxy_inject_env ();
+
+      lfd = http_proxy_listen_loopback (HTTP_PROXY_PORT);
+      if (lfd < 0)
+        die_with_error ("Can't listen on http proxy loopback");
+
+      shim = fork ();
+      if (shim == -1)
+        die_with_error ("Can't fork http proxy shim");
+      if (shim == 0)
+        {
+          if (prctl (PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0)
+            die_with_error ("prctl");
+          keep[0] = lfd;
+          keep[1] = -1;
+          fdwalk (close_extra_fds, keep);
+          http_proxy_run_tcp_shim (lfd, HTTP_PROXY_SANDBOX_PATH);
+          _exit (1);
+        }
+      close (lfd);
     }
 
   debug ("launch executable %s", argv[0]);

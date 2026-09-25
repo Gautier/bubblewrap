@@ -49,6 +49,7 @@ _bwrap() {
 		--file-label
 		--gid
 		--hostname
+		--http-allow
 		--info-fd
 		--lock-file
 		--overlay

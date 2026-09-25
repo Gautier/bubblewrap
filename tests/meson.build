@@ -7,6 +7,16 @@ test_programs = [
     dependencies : [selinux_dep],
     include_directories : common_include_directories,
   )],
+  ['test-http-proxy', executable(
+    'test-http-proxy',
+    'test-http-proxy.c',
+    '../http-proxy.c',
+    '../http-proxy.h',
+    '../utils.c',
+    '../utils.h',
+    dependencies : [selinux_dep],
+    include_directories : common_include_directories,
+  )],
 ]
 
 executable(
@@ -21,6 +31,7 @@ test_scripts = [
   'test-seccomp.py',
   'test-specifying-pidns.sh',
   'test-specifying-userns.sh',
+  'test-http-allow.sh',
 ]
 
 test_env = environment()

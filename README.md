@@ -171,6 +171,12 @@ execute commands via systemd. You can use
 [xdg-dbus-proxy](https://github.com/flatpak/xdg-dbus-proxy) to filter
 D-Bus communication.
 
+- `--http-allow` only mediates HTTP(S) from proxy-aware programs via
+`127.0.0.1:8080`. Direct sockets, DNS, and non-HTTP protocols are
+blocked by the implied `--unshare-net`, not filtered by hostname.
+Hostname allowlists cannot prevent domain fronting on a shared CDN.
+
+
 - Some applications deploy their own sandboxing mechanisms, and these can be
 restricted by the constraints imposed by bubblewrap's sandboxing.
 For example, some web browsers which configure their child proccesses via

@@ -163,6 +163,31 @@
       <listitem><para>Retain the network namespace, overriding an earlier <option>--unshare-all</option> or <option>--unshare-net</option></para></listitem>
     </varlistentry>
     <varlistentry>
+      <term><option>--http-allow <arg choice="plain">HOST</arg></option></term>
+      <listitem>
+        <para>
+          Allow HTTPS (CONNECT to port 443) and HTTP (port 80) to the
+          exact DNS name <arg choice="plain">HOST</arg> through a loopback
+          HTTP proxy at <literal>127.0.0.1:8080</literal>. Repeatable.
+          Implies <option>--unshare-net</option> and cannot be combined
+          with <option>--share-net</option>.
+        </para>
+        <para>
+          bubblewrap bind-mounts a host-side allowlisting proxy into the
+          sandbox and sets <literal>http_proxy</literal>/<literal>https_proxy</literal>
+          (and the uppercase and <literal>ALL_PROXY</literal> variants)
+          to <literal>http://127.0.0.1:8080</literal>.
+          Only programs that honour those variables can reach the network.
+          Direct sockets, DNS, and non-HTTP protocols have no route.
+          Matching is exact (case-insensitive); <literal>google.com</literal>
+          does not allow <literal>www.google.com</literal>.
+          IP literals, loopback, link-local, and private addresses are refused
+          even if the name is listed (SSRF guard).
+          Hostname allowlists cannot prevent domain fronting on a shared CDN.
+        </para>
+      </listitem>
+    </varlistentry>
+    <varlistentry>
       <term><option>--userns <arg choice="plain">FD</arg></option></term>
       <listitem><para>Use an existing user namespace instead of creating a new one. The namespace must fulfil the permission requirements for setns(), which generally means that it must be a descendant of the currently active user namespace, owned by the same user. </para>
       </listitem>
